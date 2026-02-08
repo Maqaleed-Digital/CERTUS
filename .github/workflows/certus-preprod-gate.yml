@@ -1,0 +1,93 @@
+name: Pre-Production Verification Gate
+
+on:
+  pull_request:
+    branches:
+      - main
+      - "release/*"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
+      api_url:
+        description: "Override API URL (optional). If blank, uses secrets."
+        required: false
+        default: ""
+      strict_mode:
+        description: "Treat warnings as failures"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: certus-preprod-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preprod_gate:
+    name: Pre-Production Verification Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve API URL
+        id: api
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENV="${{ inputs.environment }}"
+          OVERRIDE="${{ inputs.api_url }}"
+          if [ -n "${OVERRIDE}" ]; then
+            echo "api_url=${OVERRIDE}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${ENV}" = "production" ]; then
+            if [ -z "${{ secrets.CERTUS_PRODUCTION_API_URL }}" ]; then
+              echo "Missing secret CERTUS_PRODUCTION_API_URL" >&2
+              exit 1
+            fi
+            echo "api_url=${{ secrets.CERTUS_PRODUCTION_API_URL }}" >> "$GITHUB_OUTPUT"
+          else
+            if [ -z "${{ secrets.CERTUS_STAGING_API_URL }}" ]; then
+              echo "Missing secret CERTUS_STAGING_API_URL" >&2
+              exit 1
+            fi
+            echo "api_url=${{ secrets.CERTUS_STAGING_API_URL }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run Pre-Prod Gate Script
+        shell: bash
+        env:
+          CERTUS_API_URL: ${{ steps.api.outputs.api_url }}
+          CERTUS_ENVIRONMENT: ${{ inputs.environment }}
+          CERTUS_STRICT_MODE: ${{ inputs.strict_mode }}
+        run: |
+          set -euo pipefail
+          chmod +x "./scripts/PRE_PROD_CHECK_SCRIPT.sh"
+          "./scripts/PRE_PROD_CHECK_SCRIPT.sh"
+
+      - name: Upload Evidence Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: certus-preprod-gate-results
+          path: |
+            evidence/CHECKLIST_RESULTS.json
+            evidence/CHECKLIST_RESULTS.md
+          if-no-files-found: warn
+          retention-days: 30
