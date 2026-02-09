@@ -10,87 +10,73 @@ on:
         required: true
         default: "staging"
       api_url:
-        description: "Override API URL (optional)"
+        description: "Optional override API URL"
         required: false
         default: ""
       strict_mode:
-        description: "Treat warnings as failures (true/false)"
-        required: true
+        description: "Treat WARN as FAIL (only meaningful for production)"
+        required: false
         default: "false"
 
 permissions:
   contents: read
 
-concurrency:
-  group: certus-preprod-gate-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  preprod_gate:
+  gate:
     name: Pre-Production Verification Gate
     runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      - name: Resolve Inputs
-        id: resolve
+      - name: Debug workspace
         shell: bash
         run: |
           set -euo pipefail
+          pwd
+          ls -la
+          ls -la scripts || true
 
-          ENV=""
-          STRICT=""
-          OVERRIDE=""
-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+      - name: Resolve mode and inputs
+        id: mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "environment=staging" >> "$GITHUB_OUTPUT"
+            echo "offline_mode=true" >> "$GITHUB_OUTPUT"
+            echo "api_url=https://example.invalid" >> "$GITHUB_OUTPUT"
+            echo "strict_mode=false" >> "$GITHUB_OUTPUT"
+          else
             ENV="${{ inputs.environment }}"
-            STRICT="${{ inputs.strict_mode }}"
             OVERRIDE="${{ inputs.api_url }}"
-          else
-            ENV="staging"
-            STRICT="false"
-            OVERRIDE=""
-          fi
-
-          echo "env=${ENV}" >> "$GITHUB_OUTPUT"
-          echo "strict=${STRICT}" >> "$GITHUB_OUTPUT"
-
-          if [ -n "${OVERRIDE}" ]; then
-            echo "api_url=${OVERRIDE}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ "${ENV}" = "production" ]; then
-            if [ -z "${{ secrets.CERTUS_PRODUCTION_API_URL }}" ]; then
-              echo "api_url=https://example.com" >> "$GITHUB_OUTPUT"
+            STRICT="${{ inputs.strict_mode }}"
+            if [ -n "${OVERRIDE}" ]; then
+              echo "api_url=${OVERRIDE}" >> "$GITHUB_OUTPUT"
             else
-              echo "api_url=${{ secrets.CERTUS_PRODUCTION_API_URL }}" >> "$GITHUB_OUTPUT"
+              if [ "${ENV}" = "production" ]; then
+                echo "api_url=${{ secrets.CERTUS_PRODUCTION_API_URL }}" >> "$GITHUB_OUTPUT"
+              else
+                echo "api_url=${{ secrets.CERTUS_STAGING_API_URL }}" >> "$GITHUB_OUTPUT"
+              fi
             fi
-          else
-            if [ -z "${{ secrets.CERTUS_STAGING_API_URL }}" ]; then
-              echo "api_url=https://example.com" >> "$GITHUB_OUTPUT"
-            else
-              echo "api_url=${{ secrets.CERTUS_STAGING_API_URL }}" >> "$GITHUB_OUTPUT"
-            fi
+            echo "environment=${ENV}" >> "$GITHUB_OUTPUT"
+            echo "offline_mode=false" >> "$GITHUB_OUTPUT"
+            echo "strict_mode=${STRICT}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Run Pre-Prod Gate Script
         shell: bash
         env:
-          CERTUS_API_URL: ${{ steps.resolve.outputs.api_url }}
-          CERTUS_ENVIRONMENT: ${{ steps.resolve.outputs.env }}
-          CERTUS_STRICT_MODE: ${{ steps.resolve.outputs.strict }}
+          CERTUS_API_URL: ${{ steps.mode.outputs.api_url }}
+          CERTUS_ENVIRONMENT: ${{ steps.mode.outputs.environment }}
+          CERTUS_STRICT_MODE: ${{ steps.mode.outputs.strict_mode }}
+          CERTUS_OFFLINE_MODE: ${{ steps.mode.outputs.offline_mode }}
         run: |
           set -euo pipefail
-          ls -la
-          ls -la "./scripts" || true
-          test -f "./scripts/PRE_PROD_CHECK_SCRIPT.sh"
           chmod +x "./scripts/PRE_PROD_CHECK_SCRIPT.sh"
-          ./scripts/PRE_PROD_CHECK_SCRIPT.sh
+          "./scripts/PRE_PROD_CHECK_SCRIPT.sh"
 
       - name: Upload Evidence Artifacts
         if: always()
