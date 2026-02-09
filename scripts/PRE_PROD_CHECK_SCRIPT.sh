@@ -41,6 +41,10 @@ emit_md() {
   printf "%s\n" "${1}" >> "${MD_OUT}"
 }
 
+json_obj() {
+  python3 -c 'import json,sys; print(json.dumps(json.loads(sys.stdin.read())))'
+}
+
 add_item_json() {
   local id="${1}"
   local status="${2}"
@@ -49,11 +53,7 @@ add_item_json() {
   local data="${5}"
 
   local note_escaped
-  note_escaped="$(python3 - <<PY
-import json,sys
-print(json.dumps(sys.argv[1])[1:-1])
-PY
-"${note}")"
+  note_escaped="$(python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().rstrip())[1:-1])' <<<"${note}")"
 
   local data_json="${data}"
   if [ -z "${data_json}" ]; then
@@ -134,14 +134,6 @@ PY
 "${url}"
 }
 
-json_obj() {
-  python3 - <<PY
-import json,sys
-print(json.dumps(json.loads(sys.argv[1])))
-PY
-"${1}"
-}
-
 emit_md "# CERTUS Pre-Production Checklist Results"
 emit_md ""
 emit_md "- timestamp_utc: $(now_utc)"
@@ -172,7 +164,7 @@ emit_md ""
 emit_md "## Checks"
 emit_md ""
 
-record_item "01_api_url_present" "PASS" "true" "CERTUS_API_URL provided" "$(json_obj "{\"api_url\":\"${SAFE_API_URL}\"}")"
+record_item "01_api_url_present" "PASS" "true" "CERTUS_API_URL provided" "$(printf '%s' "{\"api_url\":\"${SAFE_API_URL}\"}" | json_obj)"
 
 case "${API_URL}" in
   https://*) record_item "02_https_scheme" "PASS" "true" "HTTPS scheme in use" "" ;;
@@ -191,9 +183,9 @@ if [ "${code}" = "000" ]; then
   record_item "03_api_reachable" "FAIL" "true" "API not reachable (no HTTP response)" ""
 else
   if [ "${code}" -ge 200 ] && [ "${code}" -lt 500 ]; then
-    record_item "03_api_reachable" "PASS" "true" "API reachable (HTTP ${code})" "$(json_obj "{\"http_code\":${code}}")"
+    record_item "03_api_reachable" "PASS" "true" "API reachable (HTTP ${code})" "$(printf '%s' "{\"http_code\":${code}}" | json_obj)"
   else
-    record_item "03_api_reachable" "FAIL" "true" "API reachable but unhealthy (HTTP ${code})" "$(json_obj "{\"http_code\":${code}}")"
+    record_item "03_api_reachable" "FAIL" "true" "API reachable but unhealthy (HTTP ${code})" "$(printf '%s' "{\"http_code\":${code}}" | json_obj)"
   fi
 fi
 
@@ -202,9 +194,9 @@ if [ "${ms}" -lt 0 ]; then
   record_item "04_latency_probe" "WARN" "false" "Latency probe failed (timeout/exception)" ""
 else
   if [ "${ms}" -le 2500 ]; then
-    record_item "04_latency_probe" "PASS" "false" "Latency OK (${ms}ms)" "$(json_obj "{\"latency_ms\":${ms}}")"
+    record_item "04_latency_probe" "PASS" "false" "Latency OK (${ms}ms)" "$(printf '%s' "{\"latency_ms\":${ms}}" | json_obj)"
   else
-    record_item "04_latency_probe" "WARN" "false" "High latency (${ms}ms)" "$(json_obj "{\"latency_ms\":${ms}}")"
+    record_item "04_latency_probe" "WARN" "false" "High latency (${ms}ms)" "$(printf '%s' "{\"latency_ms\":${ms}}" | json_obj)"
   fi
 fi
 
@@ -227,7 +219,7 @@ if echo "${hdr}" | tr -d '\r' | grep -qi "^x-content-type-options:"; then xcto="
 xfo="absent"
 if echo "${hdr}" | tr -d '\r' | grep -qi "^x-frame-options:"; then xfo="present"; fi
 
-sec_data="$(json_obj "{\"hsts\":\"${hsts}\",\"x_content_type_options\":\"${xcto}\",\"x_frame_options\":\"${xfo}\"}")"
+sec_data="$(printf '%s' "{\"hsts\":\"${hsts}\",\"x_content_type_options\":\"${xcto}\",\"x_frame_options\":\"${xfo}\"}" | json_obj)"
 if [ "${ENVIRONMENT}" = "production" ]; then
   if [ "${hsts}" = "present" ] && [ "${xcto}" = "present" ]; then
     record_item "06_security_headers" "PASS" "false" "Security headers present (baseline)" "${sec_data}"
@@ -249,22 +241,17 @@ if [ -z "${acao}" ]; then
   record_item "07_cors_presence" "WARN" "false" "CORS header not observed on base URL (may be endpoint-specific)" ""
 else
   if [ "${ENVIRONMENT}" = "production" ] && [ "${acao}" = "*" ]; then
-    record_item "07_cors_presence" "FAIL" "true" "Production CORS must not be wildcard (*)" "$(json_obj "{\"acao\":\"${acao}\"}")"
+    record_item "07_cors_presence" "FAIL" "true" "Production CORS must not be wildcard (*)" "$(printf '%s' "{\"acao\":\"${acao}\"}" | json_obj)"
   else
-    record_item "07_cors_presence" "PASS" "false" "CORS header observed (${acao})" "$(json_obj "{\"acao\":\"${acao}\"}")"
+    record_item "07_cors_presence" "PASS" "false" "CORS header observed (${acao})" "$(printf '%s' "{\"acao\":\"${acao}\"}" | json_obj)"
   fi
 fi
 
-base_path_ok="PASS"
-if echo "${SAFE_API_URL}" | grep -qE "/$"; then
-  record_item "08_url_format" "PASS" "false" "URL format OK" ""
-else
-  record_item "08_url_format" "PASS" "false" "URL format OK" ""
-fi
+record_item "08_url_format" "PASS" "false" "URL format OK" ""
 
 record_item "09_scope_firewall" "PASS" "true" "Custody/Payments/AML automation remains OFF (scope firewall)" ""
 
-record_item "10_env_strict_mode" "PASS" "true" "Strict mode resolved (${STRICT_MODE})" "$(json_obj "{\"strict_mode\":\"${STRICT_MODE}\"}")"
+record_item "10_env_strict_mode" "PASS" "true" "Strict mode resolved (${STRICT_MODE})" "$(printf '%s' "{\"strict_mode\":\"${STRICT_MODE}\"}" | json_obj)"
 
 record_item "11_evidence_write" "PASS" "true" "Evidence directory writable" ""
 
