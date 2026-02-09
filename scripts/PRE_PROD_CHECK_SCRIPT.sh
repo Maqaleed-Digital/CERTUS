@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+mkdir -p "evidence"
+JSON_OUT="evidence/CHECKLIST_RESULTS.json"
+MD_OUT="evidence/CHECKLIST_RESULTS.md"
+
+now_utc() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+emit_md() {
+  printf "%s\n" "${1}" >> "${MD_OUT}"
+}
+
 redact_url() {
   local u="${1}"
   u="${u%%\?*}"
   printf "%s" "${u}"
-}
-
-now_utc() {
-  date -u +%Y-%m-%dT%H:%M:%SZ
 }
 
 is_true() {
@@ -16,29 +24,6 @@ is_true() {
     true|TRUE|1|yes|YES|on|ON) return 0 ;;
     *) return 1 ;;
   esac
-}
-
-API_URL="${CERTUS_API_URL:-}"
-ENVIRONMENT="${CERTUS_ENVIRONMENT:-staging}"
-STRICT_MODE_RAW="${CERTUS_STRICT_MODE:-false}"
-
-STRICT_MODE="false"
-if [ "${ENVIRONMENT}" = "production" ]; then
-  STRICT_MODE="true"
-else
-  if is_true "${STRICT_MODE_RAW}"; then
-    STRICT_MODE="true"
-  fi
-fi
-
-mkdir -p "evidence"
-JSON_OUT="evidence/CHECKLIST_RESULTS.json"
-MD_OUT="evidence/CHECKLIST_RESULTS.md"
-
-: > "${MD_OUT}"
-
-emit_md() {
-  printf "%s\n" "${1}" >> "${MD_OUT}"
 }
 
 json_obj() {
@@ -50,7 +35,7 @@ add_item_json() {
   local status="${2}"
   local critical="${3}"
   local note="${4}"
-  local data="${5}"
+  local data="${5:-}"
 
   local note_escaped
   note_escaped="$(python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().rstrip())[1:-1])' <<<"${note}")"
@@ -68,7 +53,6 @@ PASS=0
 WARN=0
 MANUAL=0
 FAIL=0
-
 items_json=""
 
 record_item() {
@@ -134,6 +118,73 @@ PY
 "${url}"
 }
 
+write_final_json() {
+  local result="${1}"
+  local safe_api="${2:-null}"
+  local total="${3:-25}"
+
+  if [ "${safe_api}" = "null" ]; then
+    cat > "${JSON_OUT}" <<EOF
+{
+  "timestamp_utc": "$(now_utc)",
+  "environment": "${ENVIRONMENT:-unknown}",
+  "api_url": null,
+  "strict_mode": ${STRICT_MODE:-false},
+  "summary": { "total": ${total}, "pass": ${PASS}, "warn": ${WARN}, "manual": ${MANUAL}, "fail": ${FAIL}, "result": "${result}" },
+  "items": [${items_json}]
+}
+EOF
+  else
+    cat > "${JSON_OUT}" <<EOF
+{
+  "timestamp_utc": "$(now_utc)",
+  "environment": "${ENVIRONMENT:-unknown}",
+  "api_url": "${safe_api}",
+  "strict_mode": ${STRICT_MODE:-false},
+  "summary": { "total": ${total}, "pass": ${PASS}, "warn": ${WARN}, "manual": ${MANUAL}, "fail": ${FAIL}, "result": "${result}" },
+  "items": [${items_json}]
+}
+EOF
+  fi
+}
+
+on_exit() {
+  local code=$?
+  if [ ! -f "${MD_OUT}" ]; then
+    : > "${MD_OUT}"
+  fi
+  if [ ! -f "${JSON_OUT}" ]; then
+    emit_md ""
+    emit_md "## Summary"
+    emit_md ""
+    emit_md "- total: 25"
+    emit_md "- pass: ${PASS}"
+    emit_md "- warn: ${WARN}"
+    emit_md "- manual: ${MANUAL}"
+    emit_md "- fail: ${FAIL}"
+    emit_md "- result: NOT_READY"
+    emit_md "- exit_code: ${code}"
+    write_final_json "NOT_READY" "null" "25"
+  fi
+  exit "${code}"
+}
+trap on_exit EXIT
+
+API_URL="${CERTUS_API_URL:-}"
+ENVIRONMENT="${CERTUS_ENVIRONMENT:-staging}"
+STRICT_MODE_RAW="${CERTUS_STRICT_MODE:-false}"
+
+STRICT_MODE="false"
+if [ "${ENVIRONMENT}" = "production" ]; then
+  STRICT_MODE="true"
+else
+  if is_true "${STRICT_MODE_RAW}"; then
+    STRICT_MODE="true"
+  fi
+fi
+
+: > "${MD_OUT}"
+
 emit_md "# CERTUS Pre-Production Checklist Results"
 emit_md ""
 emit_md "- timestamp_utc: $(now_utc)"
@@ -143,18 +194,16 @@ emit_md ""
 
 if [ -z "${API_URL}" ]; then
   record_item "01_api_url_present" "FAIL" "true" "CERTUS_API_URL is missing" ""
-  RESULT="NOT_READY"
-  TOTAL=25
-  cat > "${JSON_OUT}" <<EOF
-{
-  "timestamp_utc": "$(now_utc)",
-  "environment": "${ENVIRONMENT}",
-  "api_url": null,
-  "strict_mode": ${STRICT_MODE},
-  "summary": { "total": ${TOTAL}, "pass": ${PASS}, "warn": ${WARN}, "manual": ${MANUAL}, "fail": ${FAIL}, "result": "${RESULT}" },
-  "items": [${items_json}]
-}
-EOF
+  emit_md ""
+  emit_md "## Summary"
+  emit_md ""
+  emit_md "- total: 25"
+  emit_md "- pass: ${PASS}"
+  emit_md "- warn: ${WARN}"
+  emit_md "- manual: ${MANUAL}"
+  emit_md "- fail: ${FAIL}"
+  emit_md "- result: NOT_READY"
+  write_final_json "NOT_READY" "null" "25"
   exit 1
 fi
 
@@ -248,39 +297,22 @@ else
 fi
 
 record_item "08_url_format" "PASS" "false" "URL format OK" ""
-
 record_item "09_scope_firewall" "PASS" "true" "Custody/Payments/AML automation remains OFF (scope firewall)" ""
-
 record_item "10_env_strict_mode" "PASS" "true" "Strict mode resolved (${STRICT_MODE})" "$(printf '%s' "{\"strict_mode\":\"${STRICT_MODE}\"}" | json_obj)"
-
 record_item "11_evidence_write" "PASS" "true" "Evidence directory writable" ""
-
 record_item "12_gate_artifacts" "PASS" "true" "Gate will upload CHECKLIST_RESULTS.json + CHECKLIST_RESULTS.md" ""
-
 record_item "13_deploy_workflow_present" "PASS" "false" "Controlled Deployment workflow exists in repo" ""
-
 record_item "14_preprod_workflow_present" "PASS" "false" "Pre-Production Verification Gate workflow exists in repo" ""
-
 record_item "15_production_requires_approval" "MANUAL" "true" "Production environment requires human approval (enforced in GitHub environment)" ""
-
 record_item "16_release_approvals" "MANUAL" "false" "Engineering/Security/Product approvals policy (operator process)" ""
-
 record_item "17_monitoring_thresholds" "MANUAL" "false" "Confirm monitoring/alerts thresholds configured in production" ""
-
 record_item "18_backup_restore" "MANUAL" "false" "Confirm backup/restore procedures exist for production target" ""
-
 record_item "19_incident_runbook" "MANUAL" "false" "Confirm incident response runbook is acknowledged by operators" ""
-
 record_item "20_roll_back_plan" "MANUAL" "false" "Rollback workflow not yet implemented (recommended next)" ""
-
 record_item "21_dependency_integrity" "MANUAL" "false" "Confirm dependency update policy + CI scanning coverage (if required)" ""
-
 record_item "22_data_protection" "MANUAL" "false" "Confirm PDPL/retention policies for production data handling" ""
-
 record_item "23_tenant_isolation" "MANUAL" "false" "Confirm tenant isolation validation executed against production environment" ""
-
 record_item "24_rate_limit_active" "MANUAL" "false" "Confirm rate limiting active in production runtime" ""
-
 record_item "25_operator_signoff" "MANUAL" "true" "Operator sign-off recorded (Engineering/Security/Product)" ""
 
 TOTAL=25
@@ -294,16 +326,7 @@ if [ "${STRICT_MODE}" = "true" ] && [ "${WARN}" -gt 0 ] && [ "${ENVIRONMENT}" = 
   RESULT="NOT_READY"
 fi
 
-cat > "${JSON_OUT}" <<EOF
-{
-  "timestamp_utc": "$(now_utc)",
-  "environment": "${ENVIRONMENT}",
-  "api_url": "${SAFE_API_URL}",
-  "strict_mode": ${STRICT_MODE},
-  "summary": { "total": ${TOTAL}, "pass": ${PASS}, "warn": ${WARN}, "manual": ${MANUAL}, "fail": ${FAIL}, "result": "${RESULT}" },
-  "items": [${items_json}]
-}
-EOF
+write_final_json "${RESULT}" "${SAFE_API_URL}" "${TOTAL}"
 
 emit_md ""
 emit_md "## Summary"
