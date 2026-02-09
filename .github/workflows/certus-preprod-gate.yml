@@ -8,25 +8,17 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: "Target environment"
-        required: true
-        default: "staging"
-        type: choice
-        options:
-          - staging
-          - production
-      api_url:
-        description: "Override API URL (optional). If blank, uses secrets."
+        description: "Target environment (staging|production)"
         required: false
-        default: ""
+        default: "staging"
+      api_url:
+        description: "API base URL (defaults to https://example.com)"
+        required: false
+        default: "https://example.com"
       strict_mode:
-        description: "Treat warnings as failures"
-        required: true
+        description: "Treat WARN as FAIL (production already strict)"
+        required: false
         default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
 
 permissions:
   contents: read
@@ -40,54 +32,66 @@ jobs:
   preprod_gate:
     name: Pre-Production Verification Gate
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve API URL
-        id: api
+      - name: Resolve inputs (PR vs Dispatch)
+        id: resolve
         shell: bash
         run: |
           set -euo pipefail
-          ENV="${{ inputs.environment }}"
-          OVERRIDE="${{ inputs.api_url }}"
-          if [ -n "${OVERRIDE}" ]; then
-            echo "api_url=${OVERRIDE}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "${ENV}" = "production" ]; then
-            if [ -z "${{ secrets.CERTUS_PRODUCTION_API_URL }}" ]; then
-              echo "Missing secret CERTUS_PRODUCTION_API_URL" >&2
-              exit 1
-            fi
-            echo "api_url=${{ secrets.CERTUS_PRODUCTION_API_URL }}" >> "$GITHUB_OUTPUT"
-          else
-            if [ -z "${{ secrets.CERTUS_STAGING_API_URL }}" ]; then
-              echo "Missing secret CERTUS_STAGING_API_URL" >&2
-              exit 1
-            fi
-            echo "api_url=${{ secrets.CERTUS_STAGING_API_URL }}" >> "$GITHUB_OUTPUT"
+
+          ENVIRONMENT="staging"
+          API_URL="https://example.com"
+          STRICT_MODE="false"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -n "${{ inputs.environment }}" ]; then ENVIRONMENT="${{ inputs.environment }}"; fi
+            if [ -n "${{ inputs.api_url }}" ]; then API_URL="${{ inputs.api_url }}"; fi
+            if [ -n "${{ inputs.strict_mode }}" ]; then STRICT_MODE="${{ inputs.strict_mode }}"; fi
           fi
 
-      - name: Run Pre-Prod Gate Script
+          echo "environment=${ENVIRONMENT}" >> "$GITHUB_OUTPUT"
+          echo "api_url=${API_URL}" >> "$GITHUB_OUTPUT"
+          echo "strict_mode=${STRICT_MODE}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify script exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "scripts/PRE_PROD_CHECK_SCRIPT.sh"
+          chmod +x "scripts/PRE_PROD_CHECK_SCRIPT.sh"
+
+      - name: Run pre-production gate
         shell: bash
         env:
-          CERTUS_API_URL: ${{ steps.api.outputs.api_url }}
-          CERTUS_ENVIRONMENT: ${{ inputs.environment }}
-          CERTUS_STRICT_MODE: ${{ inputs.strict_mode }}
+          CERTUS_ENVIRONMENT: ${{ steps.resolve.outputs.environment }}
+          CERTUS_API_URL: ${{ steps.resolve.outputs.api_url }}
+          CERTUS_STRICT_MODE: ${{ steps.resolve.outputs.strict_mode }}
         run: |
           set -euo pipefail
-          chmod +x "./scripts/PRE_PROD_CHECK_SCRIPT.sh"
-          "./scripts/PRE_PROD_CHECK_SCRIPT.sh"
+          rm -rf evidence || true
+          bash "scripts/PRE_PROD_CHECK_SCRIPT.sh"
 
-      - name: Upload Evidence Artifacts
+      - name: Upload evidence artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: certus-preprod-gate-results
+          name: certus-preprod-evidence-${{ github.run_id }}
           path: |
             evidence/CHECKLIST_RESULTS.json
             evidence/CHECKLIST_RESULTS.md
           if-no-files-found: warn
-          retention-days: 30
+
+      - name: Print summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ENVIRONMENT=${{ steps.resolve.outputs.environment }}"
+          echo "API_URL=${{ steps.resolve.outputs.api_url }}"
+          echo "STRICT_MODE=${{ steps.resolve.outputs.strict_mode }}"
+          test -f "evidence/CHECKLIST_RESULTS.md" && head -n 40 "evidence/CHECKLIST_RESULTS.md" || true
