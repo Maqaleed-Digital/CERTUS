@@ -1,9 +1,8 @@
-cat > "/Users/waheebmahmoud/dev/CERTUS/scripts/PRE_PROD_CHECK_SCRIPT.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 
 redact_url() {
-  local u="${1}"
+  local u="${1:-}"
   u="${u%%\?*}"
   printf "%s" "${u}"
 }
@@ -19,17 +18,17 @@ is_true() {
   esac
 }
 
-py_json() {
-  python3 - "$@" <<'PY'
+json_escape() {
+  python3 - <<'PY' "$1"
 import json,sys
-args=sys.argv[1:]
-out={}
-for a in args:
-  if "=" not in a:
-    continue
-  k,v=a.split("=",1)
-  out[k]=v
-print(json.dumps(out, separators=(",",":")))
+print(json.dumps(sys.argv[1])[1:-1])
+PY
+}
+
+json_compact() {
+  python3 - <<'PY'
+import json,sys
+print(json.dumps(json.loads(sys.stdin.read()), separators=(",",":")))
 PY
 }
 
@@ -50,7 +49,11 @@ mkdir -p "evidence"
 JSON_OUT="evidence/CHECKLIST_RESULTS.json"
 MD_OUT="evidence/CHECKLIST_RESULTS.md"
 
-: > "${MD_OUT}"
+PASS=0
+WARN=0
+MANUAL=0
+FAIL=0
+items_json=""
 
 emit_md() {
   printf "%s\n" "${1}" >> "${MD_OUT}"
@@ -61,14 +64,10 @@ add_item_json() {
   local status="${2}"
   local critical="${3}"
   local note="${4}"
-  local data="${5}"
+  local data="${5:-}"
 
   local note_escaped
-  note_escaped="$(python3 - <<'PY' "${note}"
-import json,sys
-print(json.dumps(sys.argv[1])[1:-1])
-PY
-)"
+  note_escaped="$(json_escape "${note}")"
 
   local data_json="${data}"
   if [ -z "${data_json}" ]; then
@@ -78,13 +77,6 @@ PY
   printf '{"id":"%s","status":"%s","critical":%s,"note":"%s","data":%s}' \
     "${id}" "${status}" "${critical}" "${note_escaped}" "${data_json}"
 }
-
-PASS=0
-WARN=0
-MANUAL=0
-FAIL=0
-
-items_json=""
 
 record_item() {
   local id="${1}"
@@ -132,8 +124,7 @@ http_status() {
 }
 
 latency_ms() {
-  local url="${1}"
-  python3 - "$url" <<'PY'
+  python3 - <<'PY' "$1"
 import time,sys,urllib.request
 url=sys.argv[1]
 t0=time.time()
@@ -148,6 +139,45 @@ except Exception:
 PY
 }
 
+write_outputs() {
+  local safe_api="${1}"
+  local result="${2}"
+
+  local api_json="null"
+  if [ -n "${safe_api}" ]; then
+    api_json="\"$(json_escape "${safe_api}")\""
+  fi
+
+  cat > "${JSON_OUT}" <<EOF
+{
+  "timestamp_utc": "$(now_utc)",
+  "environment": "${ENVIRONMENT}",
+  "api_url": ${api_json},
+  "strict_mode": ${STRICT_MODE},
+  "summary": { "total": 25, "pass": ${PASS}, "warn": ${WARN}, "manual": ${MANUAL}, "fail": ${FAIL}, "result": "${result}" },
+  "items": [${items_json}]
+}
+EOF
+
+  printf "" > /dev/null
+}
+
+cleanup_trap() {
+  local exit_code=$?
+  if [ ! -f "${MD_OUT}" ]; then
+    mkdir -p "evidence"
+    : > "${MD_OUT}"
+  fi
+  if [ ! -f "${JSON_OUT}" ]; then
+    mkdir -p "evidence"
+    write_outputs "" "NOT_READY"
+  fi
+  exit "${exit_code}"
+}
+trap cleanup_trap EXIT
+
+: > "${MD_OUT}"
+
 emit_md "# CERTUS Pre-Production Checklist Results"
 emit_md ""
 emit_md "- timestamp_utc: $(now_utc)"
@@ -156,29 +186,31 @@ emit_md "- strict_mode: ${STRICT_MODE}"
 emit_md ""
 
 if [ -z "${API_URL}" ]; then
+  emit_md "## Checks"
+  emit_md ""
   record_item "01_api_url_present" "FAIL" "true" "CERTUS_API_URL is missing" ""
-  RESULT="NOT_READY"
-  TOTAL=25
-  cat > "${JSON_OUT}" <<EOF
-{
-  "timestamp_utc": "$(now_utc)",
-  "environment": "${ENVIRONMENT}",
-  "api_url": null,
-  "strict_mode": ${STRICT_MODE},
-  "summary": { "total": ${TOTAL}, "pass": ${PASS}, "warn": ${WARN}, "manual": ${MANUAL}, "fail": ${FAIL}, "result": "${RESULT}" },
-  "items": [${items_json}]
-}
-EOF
+  emit_md ""
+  emit_md "## Summary"
+  emit_md ""
+  emit_md "- total: 25"
+  emit_md "- pass: ${PASS}"
+  emit_md "- warn: ${WARN}"
+  emit_md "- manual: ${MANUAL}"
+  emit_md "- fail: ${FAIL}"
+  emit_md "- result: NOT_READY"
+  write_outputs "" "NOT_READY"
+  echo "PRE-PROD CHECK NOT READY" >&2
   exit 1
 fi
 
 SAFE_API_URL="$(redact_url "${API_URL}")"
+
 emit_md "- api_url: ${SAFE_API_URL}"
 emit_md ""
 emit_md "## Checks"
 emit_md ""
 
-record_item "01_api_url_present" "PASS" "true" "CERTUS_API_URL provided" "$(py_json api_url="${SAFE_API_URL}")"
+record_item "01_api_url_present" "PASS" "true" "CERTUS_API_URL provided" "$(printf '%s' "{\"api_url\":\"${SAFE_API_URL}\"}" | json_compact)"
 
 case "${API_URL}" in
   https://*) record_item "02_https_scheme" "PASS" "true" "HTTPS scheme in use" "" ;;
@@ -197,9 +229,9 @@ if [ "${code}" = "000" ]; then
   record_item "03_api_reachable" "FAIL" "true" "API not reachable (no HTTP response)" ""
 else
   if [ "${code}" -ge 200 ] && [ "${code}" -lt 500 ]; then
-    record_item "03_api_reachable" "PASS" "true" "API reachable (HTTP ${code})" "$(py_json http_code="${code}")"
+    record_item "03_api_reachable" "PASS" "true" "API reachable (HTTP ${code})" "$(printf '%s' "{\"http_code\":${code}}" | json_compact)"
   else
-    record_item "03_api_reachable" "FAIL" "true" "API reachable but unhealthy (HTTP ${code})" "$(py_json http_code="${code}")"
+    record_item "03_api_reachable" "FAIL" "true" "API reachable but unhealthy (HTTP ${code})" "$(printf '%s' "{\"http_code\":${code}}" | json_compact)"
   fi
 fi
 
@@ -208,9 +240,9 @@ if [ "${ms}" -lt 0 ]; then
   record_item "04_latency_probe" "WARN" "false" "Latency probe failed (timeout/exception)" ""
 else
   if [ "${ms}" -le 2500 ]; then
-    record_item "04_latency_probe" "PASS" "false" "Latency OK (${ms}ms)" "$(py_json latency_ms="${ms}")"
+    record_item "04_latency_probe" "PASS" "false" "Latency OK (${ms}ms)" "$(printf '%s' "{\"latency_ms\":${ms}}" | json_compact)"
   else
-    record_item "04_latency_probe" "WARN" "false" "High latency (${ms}ms)" "$(py_json latency_ms="${ms}")"
+    record_item "04_latency_probe" "WARN" "false" "High latency (${ms}ms)" "$(printf '%s' "{\"latency_ms\":${ms}}" | json_compact)"
   fi
 fi
 
@@ -233,11 +265,7 @@ if echo "${hdr}" | tr -d '\r' | grep -qi "^x-content-type-options:"; then xcto="
 xfo="absent"
 if echo "${hdr}" | tr -d '\r' | grep -qi "^x-frame-options:"; then xfo="present"; fi
 
-sec_data="$(python3 - <<PY
-import json
-print(json.dumps({"hsts":"${hsts}","x_content_type_options":"${xcto}","x_frame_options":"${xfo}"}, separators=(",",":")))
-PY
-)"
+sec_data="$(printf '%s' "{\"hsts\":\"${hsts}\",\"x_content_type_options\":\"${xcto}\",\"x_frame_options\":\"${xfo}\"}" | json_compact)"
 if [ "${ENVIRONMENT}" = "production" ]; then
   if [ "${hsts}" = "present" ] && [ "${xcto}" = "present" ]; then
     record_item "06_security_headers" "PASS" "false" "Security headers present (baseline)" "${sec_data}"
@@ -259,15 +287,15 @@ if [ -z "${acao}" ]; then
   record_item "07_cors_presence" "WARN" "false" "CORS header not observed on base URL (may be endpoint-specific)" ""
 else
   if [ "${ENVIRONMENT}" = "production" ] && [ "${acao}" = "*" ]; then
-    record_item "07_cors_presence" "FAIL" "true" "Production CORS must not be wildcard (*)" "$(py_json acao="${acao}")"
+    record_item "07_cors_presence" "FAIL" "true" "Production CORS must not be wildcard (*)" "$(printf '%s' "{\"acao\":\"${acao}\"}" | json_compact)"
   else
-    record_item "07_cors_presence" "PASS" "false" "CORS header observed (${acao})" "$(py_json acao="${acao}")"
+    record_item "07_cors_presence" "PASS" "false" "CORS header observed (${acao})" "$(printf '%s' "{\"acao\":\"${acao}\"}" | json_compact)"
   fi
 fi
 
 record_item "08_url_format" "PASS" "false" "URL format OK" ""
 record_item "09_scope_firewall" "PASS" "true" "Custody/Payments/AML automation remains OFF (scope firewall)" ""
-record_item "10_env_strict_mode" "PASS" "true" "Strict mode resolved (${STRICT_MODE})" "$(py_json strict_mode="${STRICT_MODE}")"
+record_item "10_env_strict_mode" "PASS" "true" "Strict mode resolved (${STRICT_MODE})" "$(printf '%s' "{\"strict_mode\":${STRICT_MODE}}" | json_compact)"
 record_item "11_evidence_write" "PASS" "true" "Evidence directory writable" ""
 record_item "12_gate_artifacts" "PASS" "true" "Gate will upload CHECKLIST_RESULTS.json + CHECKLIST_RESULTS.md" ""
 record_item "13_deploy_workflow_present" "PASS" "false" "Controlled Deployment workflow exists in repo" ""
@@ -284,8 +312,6 @@ record_item "23_tenant_isolation" "MANUAL" "false" "Confirm tenant isolation val
 record_item "24_rate_limit_active" "MANUAL" "false" "Confirm rate limiting active in production runtime" ""
 record_item "25_operator_signoff" "MANUAL" "true" "Operator sign-off recorded (Engineering/Security/Product)" ""
 
-TOTAL=25
-
 RESULT="READY"
 if [ "${FAIL}" -gt 0 ]; then
   RESULT="NOT_READY"
@@ -295,26 +321,17 @@ if [ "${STRICT_MODE}" = "true" ] && [ "${WARN}" -gt 0 ] && [ "${ENVIRONMENT}" = 
   RESULT="NOT_READY"
 fi
 
-cat > "${JSON_OUT}" <<EOF
-{
-  "timestamp_utc": "$(now_utc)",
-  "environment": "${ENVIRONMENT}",
-  "api_url": "${SAFE_API_URL}",
-  "strict_mode": ${STRICT_MODE},
-  "summary": { "total": ${TOTAL}, "pass": ${PASS}, "warn": ${WARN}, "manual": ${MANUAL}, "fail": ${FAIL}, "result": "${RESULT}" },
-  "items": [${items_json}]
-}
-EOF
-
 emit_md ""
 emit_md "## Summary"
 emit_md ""
-emit_md "- total: ${TOTAL}"
+emit_md "- total: 25"
 emit_md "- pass: ${PASS}"
 emit_md "- warn: ${WARN}"
 emit_md "- manual: ${MANUAL}"
 emit_md "- fail: ${FAIL}"
 emit_md "- result: ${RESULT}"
+
+write_outputs "${SAFE_API_URL}" "${RESULT}"
 
 if [ "${RESULT}" != "READY" ]; then
   echo "PRE-PROD CHECK NOT READY" >&2
@@ -322,5 +339,3 @@ if [ "${RESULT}" != "READY" ]; then
 fi
 
 echo "PRE-PROD CHECK READY"
-SH
-chmod +x "/Users/waheebmahmoud/dev/CERTUS/scripts/PRE_PROD_CHECK_SCRIPT.sh"
