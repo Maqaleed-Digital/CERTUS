@@ -102,8 +102,7 @@ http_status() {
 
 latency_ms() {
   local url="${1}"
-  python3 - <<PY
-import time,sys,urllib.request
+  python3 -c 'import time,sys,urllib.request
 url=sys.argv[1]
 t0=time.time()
 try:
@@ -114,16 +113,15 @@ try:
   print(int(dt))
 except Exception:
   print(-1)
-PY
-"${url}"
+' "${url}"
 }
 
 write_final_json() {
   local result="${1}"
-  local safe_api="${2:-null}"
+  local safe_api="${2:-}"
   local total="${3:-25}"
 
-  if [ "${safe_api}" = "null" ]; then
+  if [ -z "${safe_api}" ]; then
     cat > "${JSON_OUT}" <<EOF
 {
   "timestamp_utc": "$(now_utc)",
@@ -164,7 +162,7 @@ on_exit() {
     emit_md "- fail: ${FAIL}"
     emit_md "- result: NOT_READY"
     emit_md "- exit_code: ${code}"
-    write_final_json "NOT_READY" "null" "25"
+    write_final_json "NOT_READY" "" "25"
   fi
   exit "${code}"
 }
@@ -203,7 +201,7 @@ if [ -z "${API_URL}" ]; then
   emit_md "- manual: ${MANUAL}"
   emit_md "- fail: ${FAIL}"
   emit_md "- result: NOT_READY"
-  write_final_json "NOT_READY" "null" "25"
+  write_final_json "NOT_READY" "" "25"
   exit 1
 fi
 
