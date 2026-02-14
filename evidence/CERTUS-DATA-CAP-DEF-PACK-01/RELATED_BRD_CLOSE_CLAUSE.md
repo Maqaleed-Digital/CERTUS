@@ -1,0 +1,1 @@
+Data Capital adoption is optional. Trust Domain core workflows must remain standalone-operable. No runtime dependency may be introduced. Only L1/L2 signals may be consumed; L3 remains protected in the vault. All consumed signals must trace to deterministic evidence packs and audited event contracts.

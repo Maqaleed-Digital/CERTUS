@@ -1,0 +1,6 @@
+Requirement ID,Artifact,Gate ID,Notes
+DC-REQ-001,MASTER_BRD_INSERTION_CLAUSE.md,G-DATA-DEF-1,Portfolio alignment clause
+DC-REQ-002,INTEGRATION_CONTRACT.md,G-DATA-DEF-2,Non-dependency contract
+DC-REQ-003,DISCLOSURE_MODEL.md,G-DATA-DEF-3,L1/L2/L3 enforcement
+DC-REQ-004,EVIDENCE_TEMPLATE.md,G-DATA-DEF-4,Deterministic structure
+DC-REQ-005,SIGNAL_EVENT_SCHEMA.json,G-DATA-DEF-5,Signal schema freeze
