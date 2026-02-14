@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0.0",
+  "namespace": "data_capital",
+  "events": [
+    {
+      "type": "data_capital.signal.generated",
+      "required_fields": ["event_id","tenant_id","occurred_at","actor_id","signal_id","signal_level","evidence_pack_id","schema_version"],
+      "constraints": {"signal_level_allowed": ["L1","L2"]}
+    }
+  ]
+}
